@@ -1,7 +1,7 @@
 Jabberbot
 =========
 
-Connects to Jabber and relays all messages through ØMQ. Handling of incoming messages can change without reconnecting to Jabber. Multiple interested applications to subscribe to incoming messages.
+Connects to Jabber and relays all messages through ØMQ. Handling of incoming messages can change without reconnecting to Jabber. Multiple interested applications can subscribe to incoming messages.
 
     Usage: Jabberbot [options]
       -password="": 
