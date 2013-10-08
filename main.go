@@ -1,28 +1,31 @@
 package main
 
 import (
-	"fmt"
 	"flag"
-	"log"
-	"os"
+	"fmt"
 	"github.com/mattn/go-xmpp"
+	"github.com/pebbe/zmq3"
 	"github.com/russellchadwick/jabberbot/contract"
 	"github.com/russellchadwick/zmq"
-	"github.com/pebbe/zmq3"
+	"log"
+	"os"
 )
 
-func main() {	
+func main() {
 	server, username, password, replyAddress, publisherAddress := parseArgs()
+
+	sendChatCommandChannel := make(chan contract.SendChatCommand, 4)
+	chatReceivedEventChannel := make(chan contract.ChatReceivedEvent, 4)
 
 	talk := connectToTalk(server, username, password)
 	publisher := connectToPublisher(publisherAddress)
-		
-	go zeroMqLoop(replyAddress, talk)
-	xmppLoop(talk, publisher)
+
+	go zeroMqLoop(replyAddress, sendChatCommandChannel)
+	go xmppLoop(talk, chatReceivedEventChannel)
+	chanLoop(sendChatCommandChannel, chatReceivedEventChannel, publisher, talk)
 }
 
-func zeroMqLoop(replyAddress *string, talk *xmpp.Client) {
-	
+func zeroMqLoop(replyAddress *string, sendChatCommandChannel chan contract.SendChatCommand) {
 	reply, err := zmq3.NewSocket(zmq3.REP)
 	if err != nil {
 		log.Fatal(err)
@@ -38,18 +41,12 @@ func zeroMqLoop(replyAddress *string, talk *xmpp.Client) {
 		}
 
 		log.Printf("Received request [%s]\n", sendChatCommand.To)
-
-		talk.Send(xmpp.Chat{
-			Remote:	sendChatCommand.To,
-			Type:	"chat",
-			Text:	sendChatCommand.Text,
-		})
-
+		sendChatCommandChannel <- sendChatCommand
 		reply.Send("", 0)
 	}
 }
 
-func xmppLoop(talk *xmpp.Client, publisher *zmq3.Socket) {
+func xmppLoop(talk *xmpp.Client, chatReceivedEventChannel chan contract.ChatReceivedEvent) {
 	for {
 		chat, err := talk.Recv()
 		if err != nil {
@@ -57,23 +54,36 @@ func xmppLoop(talk *xmpp.Client, publisher *zmq3.Socket) {
 		}
 
 		switch v := chat.(type) {
-			case xmpp.Chat:
-				chatReceivedEvent := contract.ChatReceivedEvent {
-					From: v.Remote,
-					Text: v.Text,
-				}
-		
-				zmq.SendJson(publisher, chatReceivedEvent)
+		case xmpp.Chat:
+			chatReceivedEvent := contract.ChatReceivedEvent{
+				From: v.Remote,
+				Text: v.Text,
+			}
 
-				log.Printf("Remote: [%s] Text: [%s]\n", v.Remote, v.Text)
-			//case xmpp.Presence:
-				//fmt.Println(v.Type, " From: ", v.From, " To: ", v.To, " Show: ", v.Show)
+			chatReceivedEventChannel <- chatReceivedEvent
+
+			log.Printf("Remote: [%s] Text: [%s]\n", v.Remote, v.Text)
+		}
+	}
+}
+
+func chanLoop(sendChatCommandChannel chan contract.SendChatCommand, chatReceivedEventChannel chan contract.ChatReceivedEvent, publisher *zmq3.Socket, talk *xmpp.Client) {
+	for {
+		select {
+		case sendChatCommand := <-sendChatCommandChannel:
+			talk.Send(xmpp.Chat{
+				Remote: sendChatCommand.To,
+				Type:   "chat",
+				Text:   sendChatCommand.Text,
+			})
+		case chatReceivedEvent := <-chatReceivedEventChannel:
+			zmq.SendJson(publisher, chatReceivedEvent)
 		}
 	}
 }
 
 func parseArgs() (server *string, username *string, password *string, replyAddress *string, publisherAddress *string) {
-	server   = flag.String("server", "talk.google.com:443", "")
+	server = flag.String("server", "talk.google.com:443", "")
 	username = flag.String("username", "", "Username including hostname, for google this should be @gmail.com")
 	password = flag.String("password", "", "")
 	replyAddress = flag.String("replyAddress", "ipc://sendChatCommand.ipc", "Address where REP zeromq socket will be opened. Its expecting to receive work in Json format of SendChatCommand in contracts.")
@@ -84,7 +94,7 @@ func parseArgs() (server *string, username *string, password *string, replyAddre
 		flag.PrintDefaults()
 		os.Exit(2)
 	}
-	
+
 	flag.Parse()
 	if *username == "" || *password == "" {
 		flag.Usage()
@@ -95,7 +105,7 @@ func parseArgs() (server *string, username *string, password *string, replyAddre
 
 func connectToTalk(server *string, username *string, password *string) (talk *xmpp.Client) {
 	var err error
-	
+
 	talk, err = xmpp.NewClient(*server, *username, *password)
 	if err != nil {
 		log.Fatal(err)
